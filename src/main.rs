@@ -16,7 +16,6 @@ const QUIT_TIMES: u8 = 3;
 
 #[macro_export]
 macro_rules! prompt {
-    /* modify */
     ($output:expr,$args:tt) => {
         prompt!($output, $args, callback = |&_, _, _| {})
     };
@@ -24,7 +23,7 @@ macro_rules! prompt {
         let output: &mut Output = $output;
         let mut input = String::with_capacity(32);
         loop {
-            output.status_message.set_message(format!($args, input)); // modify
+            output.status_message.set_message(format!($args, input));
             output.refresh_screen()?;
             let key_event = Reader.read_key()?;
             match key_event {
@@ -34,7 +33,7 @@ macro_rules! prompt {
                 } => {
                     if !input.is_empty() {
                         output.status_message.set_message(String::new());
-                        $callback(output, &input, KeyCode::Enter); // add line
+                        $callback(output, &input, KeyCode::Enter);
                         break;
                     }
                 }
@@ -43,7 +42,7 @@ macro_rules! prompt {
                 } => {
                     output.status_message.set_message(String::new());
                     input.clear();
-                    $callback(output, &input, KeyCode::Esc); // add line
+                    $callback(output, &input, KeyCode::Esc);
                     break;
                 }
                 KeyEvent {
@@ -64,7 +63,7 @@ macro_rules! prompt {
                 }
                 _ => {}
             }
-            $callback(output, &input, key_event.code); // add line
+            $callback(output, &input, key_event.code);
         }
         if input.is_empty() {
             None
@@ -77,37 +76,180 @@ macro_rules! prompt {
 #[macro_export]
 macro_rules! syntax_struct {
     (
-        struct $Name:ident;
+        struct $Name:ident {
+            extensions:$ext:expr,
+            file_type:$type:expr,
+            comment_start:$start:expr,
+            keywords: {
+                $([$color:expr; $($words:expr),*]),*
+            },
+            multiline_comment:$ml_comment:expr
+        }
     ) => {
-        struct $Name;
+        struct $Name {
+            extensions: &'static [&'static str],
+            file_type: &'static str,
+            comment_start:&'static str,
+            multiline_comment:Option<(&'static str,&'static str)>
+        }
+
+        impl $Name {
+            fn new() -> Self {
+                Self {
+                    extensions: &$ext,
+                    file_type: $type,
+                    comment_start:$start,
+                    multiline_comment: $ml_comment
+                }
+            }
+        }
 
         impl SyntaxHighlight for $Name {
+
+            fn comment_start(&self) -> &str {
+                self.comment_start
+            }
+
+            fn multiline_comment(&self) -> Option<(&str, &str)> {
+                self.multiline_comment
+            }
+
+            fn extensions(&self) -> &[&str] {
+                self.extensions
+            }
+
+            fn file_type(&self) -> &str {
+                self.file_type
+            }
+
             fn syntax_color(&self, highlight_type: &HighlightType) -> Color {
                 match highlight_type {
                     HighlightType::Normal => Color::Reset,
                     HighlightType::Number => Color::Cyan,
-                    HighlightType::SearchMatch => Color::Magenta,
+                    HighlightType::SearchMatch => Color::Blue,
+                    HighlightType::String => Color::Green,
+                    HighlightType::CharLiteral => Color::DarkGreen,
+                    HighlightType::Comment | HighlightType::MultilineComment => Color::DarkGrey,
+                    HighlightType::Other(color) => *color
                 }
             }
 
             fn update_syntax(&self, at: usize, editor_rows: &mut Vec<Row>) {
+                let mut in_comment = at > 0 && editor_rows[at - 1].is_comment;
                 let current_row = &mut editor_rows[at];
                 macro_rules! add {
                     ($h:expr) => {
                         current_row.highlight.push($h)
                     };
                 }
-
                 current_row.highlight = Vec::with_capacity(current_row.render.len());
-                let chars = current_row.render.chars();
-                for c in chars {
-                    if c.is_digit(10) {
-                        add!(HighlightType::Number);
+                let render = current_row.render.as_bytes();
+                let mut i = 0;
+                let mut previous_separator = true;
+                let mut in_string: Option<char> = None;
+                let comment_start = self.comment_start().as_bytes();
+                while i < render.len() {
+                    let c = render[i] as char;
+                    let previous_highlight = if i > 0 {
+                        current_row.highlight[i - 1]
                     } else {
-                        add!(HighlightType::Normal)
+                        HighlightType::Normal
+                    };
+                    if in_string.is_none() && !comment_start.is_empty() && !in_comment { // modify
+                        let end = i + comment_start.len();
+                        if render[i..cmp::min(end, render.len())] == *comment_start {
+                            (i..render.len()).for_each(|_| add!(HighlightType::Comment));
+                            break;
+                        }
                     }
+                    if let Some(val) = $ml_comment {
+                        if in_string.is_none() {
+                            if in_comment {
+                                add!(HighlightType::MultilineComment);
+                                let end = i + val.1.len();
+                                if render[i..cmp::min(render.len(),end)] == *val.1.as_bytes() {
+                                    (0..val.1.len().saturating_sub(1)).for_each(|_| add!(HighlightType::MultilineComment));
+                                    i = end;
+                                    previous_separator = true;
+                                    in_comment = false;
+                                    continue
+                                } else {
+                                    i+=1;
+                                    continue
+                                }
+                            } else {
+                                let end = i + val.0.len();
+                                if render[i..cmp::min(render.len(),end)] == *val.0.as_bytes() {
+                                    (i..end).for_each(|_| add!(HighlightType::MultilineComment));
+                                    i+= val.0.len();
+                                    in_comment = true;
+                                    continue
+                                }
+                            }
+                        }
+                    }
+                    if let Some(val) = in_string {
+                        add! {
+                            if val == '"' { HighlightType::String } else { HighlightType::CharLiteral }
+                        }
+                        if c == '\\' && i + 1 < render.len() {
+                            add! {
+                                if val == '"' { HighlightType::String } else { HighlightType::CharLiteral }
+                            }
+                            i += 2;
+                            continue
+                        }
+                        if val == c {
+                            in_string = None;
+                        }
+                        i += 1;
+                        previous_separator = true;
+                        continue;
+                    } else if c == '"' || c == '\'' {
+                        in_string = Some(c);
+                        add! {
+                            if c == '"' { HighlightType::String } else { HighlightType::CharLiteral }
+                        }
+                        i += 1;
+                        continue;
+                    }
+                    if (c.is_digit(10)
+                        && (previous_separator
+                            || matches!(previous_highlight, HighlightType::Number)))
+                        || (c == '.' && matches!(previous_highlight, HighlightType::Number))
+                    {
+                        add!(HighlightType::Number);
+                        i += 1;
+                        previous_separator = false;
+                        continue;
+                    }
+                    if previous_separator {
+                        $(
+                            $(
+                                let end = i + $words.len();
+                                let is_end_or_sep = render
+                                    .get(end)
+                                    .map(|c| self.is_separator(*c as char))
+                                    .unwrap_or(end == render.len());
+                                if is_end_or_sep && render[i..end] == *$words.as_bytes() {
+                                    (i..end).for_each(|_| add!(HighlightType::Other($color)));
+                                    i += $words.len();
+                                    previous_separator = false;
+                                    continue;
+                                }
+                            )*
+                        )*
+                    }
+                    add!(HighlightType::Normal);
+                    previous_separator = self.is_separator(c);
+                    i += 1;
                 }
-                assert_eq!(current_row.render.len(), current_row.highlight.len())
+                assert_eq!(current_row.render.len(), current_row.highlight.len());
+                let changed = current_row.is_comment != in_comment;
+                current_row.is_comment = in_comment;
+                if (changed && at + 1 < editor_rows.len()) {
+                    self.update_syntax(at+1,editor_rows)
+                }
             }
         }
     };
@@ -118,6 +260,11 @@ enum HighlightType {
     Normal,
     Number,
     SearchMatch,
+    String,
+    CharLiteral,
+    Comment,
+    MultilineComment,
+    Other (Color),
 }
 
 enum SearchDirection {
@@ -126,19 +273,51 @@ enum SearchDirection {
 }
 
 trait SyntaxHighlight {
+    fn extensions(&self) -> &[&str];
+    fn file_type(&self) -> &str;
     fn update_syntax(&self, at: usize, editor_rows: &mut Vec<Row>);
     fn syntax_color(&self, highlight_type: &HighlightType) -> Color;
+    fn comment_start(&self) -> &str;
+    fn multiline_comment(&self) -> Option<(&str, &str)>;
     fn color_row(&self, render: &str, highlight: &[HighlightType], out: &mut EditorContents) {
-        render.chars().enumerate().for_each(|(i, c)| {
-            let _ = queue!(out, SetForegroundColor(self.syntax_color(&highlight[i])));
+        let mut current_color = self.syntax_color(&HighlightType::Normal);
+        render.char_indices().for_each(|(i, c)| {
+            let color = self.syntax_color(&highlight[i]);
+            if current_color != color {
+                current_color = color;
+                let _ = queue!(out, SetForegroundColor(color));
+            }
             out.push(c);
-            let _ = queue!(out, ResetColor);
         });
+        let _ = queue!(out, SetForegroundColor(Color::Reset));
+    }
+    fn is_separator(&self, c: char) -> bool {
+        c.is_whitespace()
+            || [
+                ',', '.', '(', ')', '+', '-', '/', '*', '=', '~', '%', '<', '>', '"', '\'', ';',
+                '&',
+            ]
+            .contains(&c)
     }
 }
 
 syntax_struct! {
-    struct RustHighlight;
+    struct RustHighlight {
+        extensions:["rs"],
+        file_type:"rust",
+        comment_start:"//",
+        keywords : {
+            [Color::Yellow;
+                "mod","unsafe","extern","crate","use","type","struct","enum","union","const","static",
+                "mut","let","if","else","impl","trait","for","fn","self","Self", "while", "true","false",
+                "in","continue","break","loop","match"
+            ],
+            [Color::Reset; "isize","i8","i16","i32","i64","usize","u8","u16","u32","u64","f32","f64",
+                "char","str","bool"
+            ]
+        },
+        multiline_comment: Some(("/*", "*/"))
+    }
 }
 
 
@@ -184,6 +363,7 @@ struct Row {
     row_content: String,
     render: String,
     highlight:Vec<HighlightType>,
+    is_comment: bool,
 }
 
 struct StatusMessage {
@@ -293,6 +473,7 @@ impl Row {
             row_content,
             render,
             highlight:Vec::new(),
+            is_comment: false,
         }
     }
 
@@ -322,9 +503,8 @@ impl Row {
 }
 
 impl EditorRows {
-    fn new(syntax_highlight: Option<&dyn SyntaxHighlight>) -> Self {
-        let mut arg = env::args();
-        match arg.nth(1) {
+    fn new(syntax_highlight: &mut Option<Box<dyn SyntaxHighlight>>) -> Self {
+        match env::args().nth(1) {
             None => Self {
                 row_contents: Vec::new(),
                 filename: None,
@@ -358,9 +538,12 @@ impl EditorRows {
         }
     }
 
-    fn from_file(file: PathBuf, syntax_highlight: Option<&dyn SyntaxHighlight>) -> Self {
+    fn from_file(file: PathBuf, syntax_highlight: &mut Option<Box<dyn SyntaxHighlight>>) -> Self {
         let file_contents = fs::read_to_string(&file).expect("Unable to read file");
         let mut row_contents = Vec::new();
+        file.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| Output::select_syntax(ext).map(|syntax| syntax_highlight.insert(syntax)));
         file_contents.lines().enumerate().for_each(|(i, line)| {
             let mut row = Row::new(line.into(), String::new());
             Self::render_row(&mut row);
@@ -520,14 +703,16 @@ impl Output {
         let win_size = terminal::size()
             .map(|(x, y)| (x as usize, y as usize - 2))
             .unwrap();
-        let syntax_highlight: Option<Box<dyn SyntaxHighlight>> = Some(Box::new(RustHighlight));
+        let mut syntax_highlight = None; // modify
         Self {
             win_size,
+            line_char: String::from("~"),
             editor_contents: EditorContents::new(),
             cursor_controller: CursorController::new(win_size),
-            editor_rows: EditorRows::new(syntax_highlight.as_deref()),
-            line_char: String::from("~"),
-            status_message: StatusMessage::new("HELP: Ctrl-S = Save | Ctrl-F = Find | Ctrl-Q = Quit".into()),
+            editor_rows: EditorRows::new(&mut syntax_highlight), //modify
+            status_message: StatusMessage::new(
+                "HELP: Ctrl-S = Save | Ctrl-Q = Quit | Ctrl-F = Find".into(),
+            ),
             dirty: 0,
             search_index: SearchIndex::new(),
             syntax_highlight,
@@ -682,7 +867,11 @@ impl Output {
         let info_len = cmp::min(info.len(), self.win_size.0);
 
         let line_info = format!(
-            "{}/{}",
+            "{} | {}/{}",
+            self.syntax_highlight
+                .as_ref()
+                .map(|highlight| highlight.file_type())
+                .unwrap_or("no ft"),
             self.cursor_controller.cursor_y + 1,
             self.editor_rows.number_of_rows()
         );
@@ -865,6 +1054,12 @@ impl Output {
         }
         self.dirty += 1;
     }
+
+    fn select_syntax(extension: &str) -> Option<Box<dyn SyntaxHighlight>> {
+        let list: Vec<Box<dyn SyntaxHighlight>> = vec![Box::new(RustHighlight::new())];
+        list.into_iter()
+            .find(|it| it.extensions().contains(&extension))
+    }
 }
 
 // Cleans up after quiting
@@ -967,6 +1162,19 @@ impl Editor {
                             .set_message("Save Aborted".into());
                         return Ok(true);
                     }
+                    prompt
+                        .as_ref()
+                        .and_then(|path: &PathBuf| path.extension())
+                        .and_then(|ext| ext.to_str())
+                        .map(|ext| {
+                            Output::select_syntax(ext).map(|syntax| {
+                                let highlight = self.output.syntax_highlight.insert(syntax);
+                                for i in 0..self.output.editor_rows.number_of_rows() {
+                                    highlight
+                                        .update_syntax(i, &mut self.output.editor_rows.row_contents)
+                                }
+                            })
+                        });
                     self.output.editor_rows.filename = prompt;
                 }
                 self.output.editor_rows.save().map(|len| {
